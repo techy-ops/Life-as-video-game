@@ -178,8 +178,15 @@ def evaluate_evidence_deterministic(
             missing_requirements=["Sufficient detail or documentation", "Concrete output"]
         )
 
-    # 1. Project / Build Quests
-    if quest_type in ('project', 'build'):
+    # 1. GitHub Evidence Check
+    if evidence_kind == 'github' or (github_activity and github_activity.get("commits")) or "github commit" in low or "commit:" in low:
+        relevance_score = 0.90
+        quality_score = 0.88
+        completeness_score = 0.85
+        missing = []
+
+    # 1b. Project / Build Quests
+    elif quest_type in ('project', 'build'):
         has_code = bool(re.search(r'(def |class |function |import |const |return |github\.com)', text))
         has_repo = "github.com" in low or (github_activity and github_activity.get("commits"))
         

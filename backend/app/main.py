@@ -918,6 +918,56 @@ def process_github_activity_sync(s: Session, u: User, sync_data: Dict[str, Any])
         qd['goal_type'] = g_obj.goal_type
         active_quests.append(qd)
 
+    # For every active engineering/coding goal without active quests,
+    # generate an iteration build quest so continuous commits continue progressing the campaign
+    active_goals = (
+        s.query(Goal)
+        .filter(Goal.user_id == u.id, Goal.status == 'active')
+        .all()
+    )
+    goal_ids_with_active_quests = {q.get('goal_id') for q in active_quests}
+    for g in active_goals:
+        g_cat = (g.category or "").lower()
+        if g_cat in ('learning', 'career', 'personal', 'creativity', 'coding', 'projects') and g.id not in goal_ids_with_active_quests:
+            camp = s.query(Campaign).filter_by(goal_id=g.id).first()
+            last_m = s.query(Milestone).filter_by(campaign_id=camp.id).order_by(Milestone.order_index.desc()).first() if camp else None
+            m_id = last_m.id if last_m else None
+            if camp and not m_id:
+                m_obj = Milestone(
+                    campaign_id=camp.id,
+                    title=f"Continuous Iteration: {g.title}",
+                    description=f"Ongoing development for {g.title}",
+                    order_index=99,
+                    status='active'
+                )
+                s.add(m_obj)
+                s.flush()
+                m_id = m_obj.id
+
+            iter_q = Quest(
+                milestone_id=m_id,
+                goal_id=g.id,
+                title=f"Build Iteration: {g.title}",
+                description=f"Continuous project implementation, code refactoring and feature delivery for {g.title}.",
+                quest_type="build",
+                xp=120,
+                coin_reward=35,
+                estimated_minutes=45,
+                difficulty=3,
+                evidence_required=True,
+                assessment_required=False,
+                status="in_progress",
+                order_index=999
+            )
+            s.add(iter_q)
+            s.flush()
+            qd = clean(iter_q)
+            qd['goal_title'] = g.title
+            qd['goal_category'] = g.category
+            qd['goal_type'] = g.goal_type
+            active_quests.append(qd)
+            goal_ids_with_active_quests.add(g.id)
+
     matched_quest_titles = []
     evidence_created_count = 0
     new_records_count = 0
@@ -1013,10 +1063,15 @@ def process_github_activity_sync(s: Session, u: User, sync_data: Dict[str, Any])
                     # 3. Update quest progression & rewards if quest is active
                     if q.status in ('available', 'in_progress'):
                         if q.assessment_required:
-                            # Quiz protection: attach evidence, mark in_progress, do NOT bypass quiz
+                            # Award deliverable proof XP & coins while retaining diagnostic quiz for complete mastery
                             if q.status == 'available':
                                 q.status = 'in_progress'
-                            notify(s, u, 'GitHub Evidence Attached', f"Verified commit from {repo} attached to {q.title}. Complete the quiz assessment to claim rewards.", 'evidence')
+                            ev_xp = max(40, round(q.xp * 0.6))
+                            ev_coins = max(10, round(q.coin_reward * 0.6))
+                            add_xp(u, ev_xp)
+                            u.coins += ev_coins
+                            total_xp_awarded += ev_xp
+                            notify(s, u, 'GitHub Evidence Verified', f"Verified commit from {repo} attached to {q.title}! +{ev_xp} XP, +{ev_coins} coins awarded. Take the diagnostic quiz when ready for full mastery completion.", 'evidence')
                         else:
                             # Tangible coding/project quest: complete using authoritative RPG progression
                             prog_res = complete_quest_progression(
@@ -1203,6 +1258,11 @@ async def evidence_github_commit(qid: int, commit_data: Dict[str, Any], s: Sessi
                 res['missing_requirements'] = json.loads(ev.missing_requirements_json) if ev.missing_requirements_json else []
             except Exception:
                 res['missing_requirements'] = []
+            res['earned_xp'] = 0
+            res['earned_coins'] = 0
+            res['quest_completed'] = (q.status == 'completed')
+            res['total_xp'] = u.xp
+            res['level'] = u.level
             return res
 
     combined_text = f"GitHub Commit: {title}\nRepo: {repo}\nDescription: {desc}\nURL: {url}"
@@ -1222,9 +1282,53 @@ async def evidence_github_commit(qid: int, commit_data: Dict[str, Any], s: Sessi
         feedback=eval_res.feedback,
         missing_requirements_json=json.dumps(eval_res.missing_requirements)
     )
-    s.add(e); s.commit()
+    s.add(e)
+
+    # Link UnifiedActivityRecord if present
+    cid = sha or commit_data.get('id', '')
+    if cid:
+        uar = s.query(UnifiedActivityRecord).filter(
+            UnifiedActivityRecord.user_id == u.id,
+            UnifiedActivityRecord.external_id.in_([cid, commit_data.get('id', ''), sha])
+        ).first()
+        if uar:
+            uar.matched_quest_id = qid
+
+    earned_xp = 0
+    earned_coins = 0
+    quest_completed = False
+    next_quest_info = None
+
+    if q.status in ('available', 'in_progress'):
+        if not q.assessment_required:
+            prog_res = complete_quest_progression(
+                s, u, q,
+                score=0.88,
+                feedback=f"Completed with verified GitHub commit '{title}' in repository {repo}."
+            )
+            earned_xp = prog_res.get('earned_xp', 0)
+            earned_coins = prog_res.get('earned_coins', 0)
+            quest_completed = True
+            next_quest_info = prog_res.get('next_quest')
+            notify(s, u, 'Quest Cleared via GitHub', f"'{q.title}' completed via attached GitHub commit! +{earned_xp} XP, +{earned_coins} coins.", 'quest')
+        else:
+            if q.status == 'available':
+                q.status = 'in_progress'
+            earned_xp = max(40, round(q.xp * 0.6))
+            earned_coins = max(10, round(q.coin_reward * 0.6))
+            add_xp(u, earned_xp)
+            u.coins += earned_coins
+            notify(s, u, 'GitHub Evidence Verified', f"Verified commit attached to {q.title}! +{earned_xp} XP, +{earned_coins} coins awarded.", 'evidence')
+
+    s.commit()
     res = clean(e)
     res['missing_requirements'] = eval_res.missing_requirements
+    res['earned_xp'] = earned_xp
+    res['earned_coins'] = earned_coins
+    res['quest_completed'] = quest_completed
+    res['next_quest'] = next_quest_info
+    res['total_xp'] = u.xp
+    res['level'] = u.level
     return res
 
 @app.get('/api/evidence/{qid}')

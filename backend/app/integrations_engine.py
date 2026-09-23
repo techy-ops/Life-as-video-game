@@ -199,7 +199,7 @@ class GitHubProvider(BaseProvider):
         )
 
     async def exchange_code(self, code: str, redirect_uri: str) -> Dict[str, Any]:
-        if not self.is_configured() or code.startswith("demo_"):
+        if not self.is_configured() or code.startswith("demo_") or "mock" in code:
             return {
                 "access_token": f"gh_demo_{secrets.token_hex(16)}",
                 "external_user_id": "demo_coder",
@@ -913,11 +913,16 @@ def match_activity_to_quests(
                     score += 10
                 elif repo_token_overlap and (overlap_title or overlap_goal or all_keyword_overlap):
                     score += 7
+                elif repo_in_text:
+                    # Direct commit to the specific repository linked to this goal / quest!
+                    score += 6
+                elif repo_token_overlap and any(w in act_title_lower for w in ["api", "router", "endpoint", "feat", "fix", "crud", "test", "build", "refactor", "changes", "update"]):
+                    score += 5
                 elif all_keyword_overlap:
                     score += 5 + len(all_keyword_overlap)
                 elif (overlap_title or overlap_goal):
                     score += 4
-                elif repo_token_overlap and any(w in act_title_lower for w in ["api", "router", "endpoint", "feat", "fix", "crud", "test", "build", "refactor", "changes", "update"]):
+                elif repo_token_overlap:
                     score += 3
 
                 # Prefer active coding/project quests over generic when committing real code

@@ -82,6 +82,26 @@ class TestGitHubEvidenceAndProgress(unittest.TestCase):
         s.query(User).filter_by(id=uid).delete(synchronize_session=False)
         s.commit()
 
+    def setUp(self):
+        it = self.db.query(Integration).filter_by(user_id=self.user.id, provider="GitHub").first()
+        if not it:
+            it = Integration(
+                user_id=self.user.id,
+                provider="GitHub",
+                connected=True,
+                status="connected",
+                is_live=True,
+                access_token_enc=encrypt_token("gho_test_valid_access_token_123"),
+                account_name="hero_dev"
+            )
+            self.db.add(it)
+        else:
+            it.connected = True
+            it.status = "connected"
+            it.is_live = True
+            it.access_token_enc = encrypt_token("gho_test_valid_access_token_123")
+        self.db.commit()
+
     def auth_headers(self):
         return {"Authorization": f"Bearer {self.token}"}
 

@@ -1518,7 +1518,16 @@ def clean_integration(i: Integration):
     data.pop('refresh_token_enc', None)
     prov = get_provider(i.provider)
     data['is_configured'] = prov.is_configured() if prov else False
-    data['is_live'] = bool(getattr(i, 'is_live', False))
+    err_low = (getattr(i, 'error_message', '') or '').lower()
+    is_auth_error = 'expired or revoked' in err_low or 'bad credentials' in err_low
+    if getattr(i, 'status', '') == 'reauth_required' or is_auth_error:
+        data['connected'] = False
+        data['status'] = 'reauth_required'
+        data['is_live'] = False
+    else:
+        data['connected'] = bool(getattr(i, 'connected', False))
+        data['status'] = getattr(i, 'status', 'disconnected') or ('connected' if data['connected'] else 'disconnected')
+        data['is_live'] = bool(getattr(i, 'is_live', False))
     data['account_name'] = getattr(i, 'account_name', '') or getattr(i, 'external_user_id', '')
     data['token_expiry'] = i.token_expiry.isoformat() if getattr(i, 'token_expiry', None) else None
     if 'metadata_json' in data and data['metadata_json']:
@@ -1533,8 +1542,19 @@ def clean_integration(i: Integration):
 @app.get('/api/integrations')
 def list_integrations(s:Session=Depends(db),u:User=Depends(current_user)):
     seed_integrations(s,u)
-    s.commit()
     rows = s.query(Integration).filter_by(user_id=u.id).all()
+    changed = False
+    for x in rows:
+        err_low = (x.error_message or '').lower()
+        if ('expired or revoked' in err_low or 'bad credentials' in err_low) and (x.connected or x.status != 'reauth_required'):
+            x.connected = False
+            x.status = 'reauth_required'
+            x.is_live = False
+            x.access_token_enc = ''
+            x.refresh_token_enc = ''
+            changed = True
+    if changed:
+        s.commit()
     return [clean_integration(x) for x in rows]
 
 @app.post('/api/integrations')

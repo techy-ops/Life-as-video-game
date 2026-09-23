@@ -419,10 +419,13 @@ class TestGitHubEvidenceAndProgress(unittest.TestCase):
         self.assertEqual(resp.status_code, 502)
         self.assertIn("expired or revoked", resp.json()["detail"])
 
-        # Check DB status was safely updated to failed
+        # Check DB status was safely updated to failed and reauth_required
         self.db.refresh(it)
         self.assertEqual(it.sync_status, "failed")
         self.assertIn("expired or revoked", it.error_message)
+        self.assertFalse(it.connected)
+        self.assertEqual(it.status, "reauth_required")
+        self.assertEqual(it.access_token_enc, "")
 
         # Re-connect for the 403 test
         it.connected = True

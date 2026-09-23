@@ -67,7 +67,7 @@ function App() {
           if (!provider) {
             provider = params.get('provider') || (code.startsWith('ya29') ? 'Google Calendar' : 'GitHub');
           }
-          const redirectUri = window.location.origin + window.location.pathname;
+          const redirectUri = window.location.origin + '/integrations';
           await request(`/integrations/${provider}/callback`, {
             method: 'POST',
             body: JSON.stringify({ code, state, redirect_uri: redirectUri })

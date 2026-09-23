@@ -240,14 +240,63 @@ class GitHubProvider(BaseProvider):
             login = user_info.get("login") or "github_user"
             name = user_info.get("name") or login
 
-            return {
+            out = {
                 "access_token": token,
                 "external_user_id": str(login),
                 "scopes": data.get("scope", "read:user,repo"),
                 "account_name": name,
                 "is_live": True
             }
+            if data.get("refresh_token"):
+                out["refresh_token"] = data["refresh_token"]
+            if data.get("expires_in"):
+                out["expires_in"] = data["expires_in"]
+            return out
 
+    async def refresh_token_if_needed(self, refresh_token: str) -> Optional[Dict[str, Any]]:
+        client_id = os.getenv("GITHUB_CLIENT_ID", "")
+        client_secret = os.getenv("GITHUB_CLIENT_SECRET", "")
+        if not (client_id and client_secret) or not refresh_token:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    "https://github.com/login/oauth/access_token",
+                    headers={"Accept": "application/json"},
+                    data={
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token
+                    }
+                )
+                data = resp.json()
+                if "access_token" in data:
+                    return {
+                        "access_token": data["access_token"],
+                        "refresh_token": data.get("refresh_token", refresh_token),
+                        "expires_in": data.get("expires_in")
+                    }
+        except Exception:
+            return None
+        return None
+
+    async def revoke_token(self, access_token: str) -> bool:
+        client_id = os.getenv("GITHUB_CLIENT_ID", "")
+        client_secret = os.getenv("GITHUB_CLIENT_SECRET", "")
+        if client_id and client_secret and access_token and not access_token.startswith("gh_demo_"):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.request(
+                        "DELETE",
+                        f"https://api.github.com/applications/{client_id}/grant",
+                        headers={"Accept": "application/vnd.github+json", "User-Agent": "LIFE-RPG-Platform"},
+                        auth=(client_id, client_secret),
+                        json={"access_token": access_token}
+                    )
+            except Exception:
+                pass
+        return True
 
     async def sync(self, access_token: str) -> Dict[str, Any]:
         """Fetches live repositories and recent commits using access token."""
@@ -304,42 +353,62 @@ class GitHubProvider(BaseProvider):
 
             for r in repos:
                 repo_name = r.get("name", "")
-                owner_login = r.get("owner", {}).get("login", "")
+                owner_login = (r.get("owner") or {}).get("login", "")
+                repo_id = r.get("id") or repo_name
                 items.append({
-                    "id": f"repo_{r.get('id')}",
+                    "id": f"repo_{repo_id}",
                     "type": "repo",
                     "title": repo_name,
                     "description": r.get("description") or "Repository",
                     "url": r.get("html_url", ""),
-                    "timestamp": r.get("updated_at", ""),
+                    "timestamp": r.get("updated_at", "") or datetime.now().isoformat(),
                     "repository": repo_name
                 })
 
                 # Fetch recent commits for the active repo
-                if owner_login and repo_name and len(items) < 15:
+                if owner_login and repo_name and len(items) < 30:
                     try:
                         commits_resp = await client.get(
                             f"https://api.github.com/repos/{owner_login}/{repo_name}/commits?per_page=3",
                             headers=headers
                         )
-                        if commits_resp.status_code == 200:
-                            for c in commits_resp.json():
-                                sha = c.get("sha", "")
-                                commit_msg = c.get("commit", {}).get("message", "Commit")
-                                first_line = commit_msg.split("\n")[0][:100]
-                                author_name = c.get("commit", {}).get("author", {}).get("name", "Author")
-                                commit_date = c.get("commit", {}).get("author", {}).get("date", "")
-                                items.append({
-                                    "id": f"commit_{sha[:8]}",
-                                    "type": "commit",
-                                    "title": first_line,
-                                    "description": commit_msg,
-                                    "url": c.get("html_url", ""),
-                                    "timestamp": commit_date,
-                                    "repository": repo_name,
-                                    "sha": sha[:12],
-                                    "author": author_name
-                                })
+                        if commits_resp.status_code == 401:
+                            raise ValueError("GitHub access token expired or revoked. Please reconnect.")
+                        elif commits_resp.status_code == 403:
+                            if commits_resp.headers.get("x-ratelimit-remaining") == "0":
+                                raise ValueError("GitHub API rate limit exceeded.")
+                            continue
+                        elif commits_resp.status_code in (404, 409):
+                            # 404: not found / private; 409: empty git repository
+                            continue
+                        elif commits_resp.status_code == 200:
+                            commits_data = commits_resp.json()
+                            if isinstance(commits_data, list):
+                                for c in commits_data:
+                                    sha = c.get("sha", "")
+                                    if not sha:
+                                        continue
+                                    commit_obj = c.get("commit") or {}
+                                    commit_msg = commit_obj.get("message", "Commit")
+                                    first_line = commit_msg.split("\n")[0][:100] if commit_msg else "Commit"
+                                    author_dict = commit_obj.get("author") or {}
+                                    committer_dict = commit_obj.get("committer") or {}
+                                    author_name = author_dict.get("name") or committer_dict.get("name") or "Author"
+                                    commit_date = author_dict.get("date") or committer_dict.get("date") or datetime.now().isoformat()
+                                    commit_url = c.get("html_url") or f"https://github.com/{owner_login}/{repo_name}/commit/{sha}"
+                                    items.append({
+                                        "id": f"commit_{sha[:8]}",
+                                        "type": "commit",
+                                        "title": first_line,
+                                        "description": commit_msg,
+                                        "url": commit_url,
+                                        "timestamp": commit_date,
+                                        "repository": repo_name,
+                                        "sha": sha[:12] if len(sha) >= 12 else sha,
+                                        "author": author_name
+                                    })
+                    except ValueError:
+                        raise
                     except Exception:
                         pass
 

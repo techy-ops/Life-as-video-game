@@ -629,6 +629,7 @@ function Integrations({ refresh }) {
         const isConn = !!x.connected;
         const isLive = !!x.is_live;
         const isConfigured = !!x.is_configured;
+        const isReauth = x.status === 'reauth_required' || (!isConn && x.error_message && x.error_message.toLowerCase().includes('expired or revoked'));
         const meta = x.metadata || {};
         const items = meta.items || [];
         const events = meta.events || [];
@@ -642,9 +643,15 @@ function Integrations({ refresh }) {
               <div className="intTitle">
                 <h3>{x.provider}</h3>
                 <div>
-                  <span className={`intStatusPill ${isConn ? 'live' : 'disconnected'}`}>
-                    {isConn ? '● LIVE CONNECTED' : '○ NOT CONNECTED'}
-                  </span>
+                  {isReauth ? (
+                    <span className="intStatusPill reauth">
+                      ⚠️ REAUTH REQUIRED
+                    </span>
+                  ) : (
+                    <span className={`intStatusPill ${isConn ? 'live' : 'disconnected'}`}>
+                      {isConn ? (isLive ? '● LIVE CONNECTED' : '● DEMO SIMULATION') : '○ NOT CONNECTED'}
+                    </span>
+                  )}
                 </div>
                 <div>
                   <span className={`configBadge ${isConfigured ? 'ready' : 'unconfigured'}`}>
@@ -654,17 +661,21 @@ function Integrations({ refresh }) {
                 {x.account_name && <div className="accountPill">@{x.account_name}</div>}
               </div>
             </div>
-            {isConn && <button className="syncBtn" disabled={syncing[x.provider]} onClick={() => syncProvider(x)}>
+            {isConn && !isReauth && <button className="syncBtn" disabled={syncing[x.provider]} onClick={() => syncProvider(x)}>
               <RefreshCw className={syncing[x.provider] ? 'spin' : ''} size={12} /> {syncing[x.provider] ? 'Syncing…' : 'Sync Now'}
+            </button>}
+            {isReauth && <button className="syncBtn" style={{ borderColor: 'var(--danger)', color: '#f87171' }} onClick={() => connectProvider(x)}>
+              <RefreshCw size={12} /> Reconnect
             </button>}
           </div>
 
           <div className="intDesc">{getDesc(x.provider)}</div>
 
+          {x.error_message && <div style={{ marginTop: 6, fontSize: 11, color: '#f87171', background: '#ef444415', padding: '6px 10px', borderRadius: 6, border: '1px solid #ef444433' }}>⚠️ {x.error_message}</div>}
+
           {isConn && <div className="intMeta">
             <div><b>Last sync:</b> {x.last_sync_at ? new Date(x.last_sync_at).toLocaleString() : 'Just now'}</div>
             {meta.summary && <div style={{ marginTop: 4, color: 'var(--accent)' }}>ℹ️ {meta.summary}</div>}
-            {x.error_message && <div style={{ marginTop: 4, color: 'var(--danger)' }}>⚠️ {x.error_message}</div>}
 
             {/* GitHub synced preview */}
             {x.provider === 'GitHub' && items.length > 0 && <div className="activityMiniList">
@@ -716,7 +727,14 @@ function Integrations({ refresh }) {
           </div>}
 
           <div className="intActions" style={{ marginTop: 16 }}>
-            {isConn ? (
+            {isReauth ? (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="primary" style={{ flex: 1 }} onClick={() => connectProvider(x)}>
+                  <RefreshCw size={14} /> Reconnect {x.provider}
+                </button>
+                <button className="secondary" onClick={() => disconnectProvider(x)}>Disconnect</button>
+              </div>
+            ) : isConn ? (
               <button className="secondary" onClick={() => disconnectProvider(x)}>Disconnect Provider</button>
             ) : (
               <button className="primary" style={{ width: '100%' }} onClick={() => connectProvider(x)}>

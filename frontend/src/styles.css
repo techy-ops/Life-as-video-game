@@ -132,6 +132,7 @@
 /* Phase 3 Live / Demo Badges & Activity Feed */
 .intStatusPill.live{background:#22c55e22;border:1px solid #22c55e88;color:#4ade80}
 .intStatusPill.demo{background:#eab30822;border:1px solid #eab30866;color:#fde047}
+.intStatusPill.reauth{background:#ef444422;border:1px solid #ef444488;color:#f87171}
 .configBadge{font-size:9px;font-weight:700;display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:6px;margin-top:4px}
 .configBadge.ready{background:#3b82f61a;border:1px solid #3b82f655;color:#60a5fa}
 .configBadge.unconfigured{background:#64748b1a;border:1px solid #64748b44;color:#94a3b8}

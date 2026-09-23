@@ -559,16 +559,18 @@ function Integrations({ refresh }) {
     setSyncing(s => ({ ...s, [p.provider]: true }));
     try {
       const res = await request(`/integrations/${p.provider}/sync`, { method: 'POST' });
-      await load();
-      if (refresh) await refresh();
       const awarded = res?.sync_stats?.total_xp_awarded || 0;
       if (awarded > 0) {
         const quests = res?.sync_stats?.matched_quests?.join(', ') || 'Active Quest';
         alert(`🎉 ${p.provider} Sync Complete!\n\n+${awarded} XP Awarded!\nQuests Cleared: ${quests}`);
+      } else {
+        alert(`✅ ${p.provider} Sync Complete!\n\nAll repositories and commits are synchronized.`);
       }
     } catch (e) {
       alert(`Sync error: ${e.message}`);
     } finally {
+      await load();
+      if (refresh) await refresh();
       setSyncing(s => ({ ...s, [p.provider]: false }));
     }
   };

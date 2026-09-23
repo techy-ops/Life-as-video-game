@@ -1738,10 +1738,12 @@ async def sync_integration_endpoint(provider: str, s: Session=Depends(db), u: Us
     if not prov:
         raise HTTPException(404, f"Provider '{provider}' not supported.")
     it = s.query(Integration).filter_by(user_id=u.id, provider=prov.name).first()
-    if not it or not it.connected:
+    if not it:
         raise HTTPException(400, f"{provider} is not connected.")
     if it.status == 'reauth_required':
         raise HTTPException(400, f"{provider} token is expired or revoked. Please reconnect via OAuth.")
+    if not it.connected:
+        raise HTTPException(400, f"{provider} is not connected.")
         
     token = decrypt_token(it.access_token_enc) if it.access_token_enc else ""
     refresh_token = decrypt_token(it.refresh_token_enc) if it.refresh_token_enc else ""

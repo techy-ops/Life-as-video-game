@@ -627,3 +627,151 @@ class TestGitHubEvidenceAndProgress(unittest.TestCase):
 
         self.db.refresh(self.user)
         self.assertEqual(self.user.xp, xp_after, "Duplicate sync must NOT increase XP twice")
+
+    @patch("httpx.AsyncClient")
+    def test_f_github_expired_token_marks_reauth_and_reconnect_flow(self, mock_client_cls):
+        """
+        Scenario F:
+        1. Connected GitHub encounters 401 Unauthorized during sync.
+        2. Backend immediately transitions integration to connected=False, status='reauth_required', and clears token.
+        3. GET /api/integrations reflects reauth_required and connected=False without token leakage.
+        4. Re-sync while reauth_required is cleanly rejected with 400.
+        5. User initiates reconnect via OAuth callback: integration restored to connected=True, status='connected'.
+        """
+        it = self.db.query(Integration).filter_by(user_id=self.user.id, provider="GitHub").first()
+        if not it:
+            it = Integration(user_id=self.user.id, provider="GitHub")
+            self.db.add(it)
+        it.connected = True
+        it.status = "connected"
+        it.is_live = True
+        it.sync_status = "idle"
+        it.error_message = ""
+        it.access_token_enc = encrypt_token("gho_old_token_to_expire_123")
+        self.db.commit()
+
+        # 1. Trigger sync that fails with 401
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+        mock_resp_401 = MagicMock()
+        mock_resp_401.status_code = 401
+        mock_client.get.return_value = mock_resp_401
+
+        resp = self.client.post("/api/integrations/GitHub/sync", headers=self.auth_headers())
+        self.assertEqual(resp.status_code, 502)
+        self.assertIn("expired or revoked", resp.json()["detail"])
+
+        # 2. Check DB status
+        self.db.refresh(it)
+        self.assertFalse(it.connected)
+        self.assertEqual(it.status, "reauth_required")
+        self.assertEqual(it.sync_status, "failed")
+        self.assertEqual(it.access_token_enc, "")
+
+        # 3. Check GET /api/integrations
+        list_resp = self.client.get("/api/integrations", headers=self.auth_headers())
+        self.assertEqual(list_resp.status_code, 200)
+        gh_item = next((x for x in list_resp.json() if x["provider"] == "GitHub"), None)
+        self.assertIsNotNone(gh_item)
+        self.assertFalse(gh_item["connected"])
+        self.assertEqual(gh_item["status"], "reauth_required")
+        self.assertNotIn("access_token", gh_item)
+        self.assertNotIn("access_token_enc", gh_item)
+
+        # 4. Attempting sync while reauth_required returns 400
+        sync_while_reauth = self.client.post("/api/integrations/GitHub/sync", headers=self.auth_headers())
+        self.assertEqual(sync_while_reauth.status_code, 400)
+        self.assertIn("reconnect", sync_while_reauth.json()["detail"].lower())
+
+        # 5. Reconnect via OAuth callback
+        mock_post_resp = MagicMock()
+        mock_post_resp.json.return_value = {
+            "access_token": "gho_new_fresh_reconnected_token_456",
+            "scope": "read:user,repo"
+        }
+        mock_client.post.return_value = mock_post_resp
+
+        mock_user_resp = MagicMock()
+        mock_user_resp.status_code = 200
+        mock_user_resp.json.return_value = {"login": "hero_dev", "name": "Hero Developer"}
+
+        mock_repos_resp = MagicMock()
+        mock_repos_resp.status_code = 200
+        mock_repos_resp.json.return_value = []
+
+        mock_client.get.side_effect = [mock_user_resp, mock_repos_resp]
+
+        state = f"{self.user.id}_github_reconnect_123"
+        cb_resp = self.client.post(
+            "/api/integrations/GitHub/callback",
+            json={"code": "live_reconnect_code_789", "state": state, "redirect_uri": "http://localhost:5173/integrations"},
+            headers=self.auth_headers()
+        )
+        self.assertEqual(cb_resp.status_code, 200)
+        cb_data = cb_resp.json()
+        self.assertTrue(cb_data["connected"])
+        self.assertEqual(cb_data["status"], "connected")
+
+        self.db.refresh(it)
+        self.assertTrue(it.connected)
+        self.assertEqual(it.status, "connected")
+        self.assertNotEqual(it.access_token_enc, "")
+
+    @patch("httpx.AsyncClient")
+    def test_g_github_empty_repo_and_rate_limit_resilience(self, mock_client_cls):
+        """
+        Scenario G:
+        - Handle empty git repositories (409 Conflict) without crashing sync.
+        - Handle rate limit headers (403 with x-ratelimit-remaining: 0).
+        """
+        it = self.db.query(Integration).filter_by(user_id=self.user.id, provider="GitHub").first()
+        it.connected = True
+        it.status = "connected"
+        it.sync_status = "idle"
+        it.error_message = ""
+        it.access_token_enc = encrypt_token("gho_test_valid_access_token_123")
+        self.db.commit()
+
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+        # 1. Test empty repo (409) along with active repo
+        mock_repos_resp = MagicMock()
+        mock_repos_resp.status_code = 200
+        mock_repos_resp.json.return_value = [
+            {"id": 1, "name": "empty-repo", "owner": {"login": "hero_dev"}, "html_url": "https://github.com/hero_dev/empty-repo"},
+            {"id": 2, "name": "active-repo", "owner": {"login": "hero_dev"}, "html_url": "https://github.com/hero_dev/active-repo"}
+        ]
+
+        mock_409_commits = MagicMock()
+        mock_409_commits.status_code = 409
+        mock_409_commits.json.return_value = {"message": "Git Repository is empty."}
+
+        mock_active_commits = MagicMock()
+        mock_active_commits.status_code = 200
+        mock_active_commits.json.return_value = [
+            {
+                "sha": "123456789abc",
+                "commit": {"message": "feat: init active repo", "author": {"name": "Hero Dev", "date": "2026-09-20T10:00:00Z"}},
+                "html_url": "https://github.com/hero_dev/active-repo/commit/123456789abc"
+            }
+        ]
+
+        mock_client.get.side_effect = [mock_repos_resp, mock_409_commits, mock_active_commits]
+
+        sync_resp = self.client.post("/api/integrations/GitHub/sync", headers=self.auth_headers())
+        self.assertEqual(sync_resp.status_code, 200)
+        items = sync_resp.json()["data"]["items"]
+        # Empty repo was recorded, but skipped on commits; active repo synced commits
+        self.assertTrue(any(i["id"] == "commit_12345678" for i in items))
+
+        # 2. Test rate limit on commit call
+        mock_client.get.side_effect = None
+        mock_rate_limit_resp = MagicMock()
+        mock_rate_limit_resp.status_code = 403
+        mock_rate_limit_resp.headers = {"x-ratelimit-remaining": "0"}
+        mock_client.get.side_effect = [mock_repos_resp, mock_rate_limit_resp]
+
+        rl_resp = self.client.post("/api/integrations/GitHub/sync", headers=self.auth_headers())
+        self.assertEqual(rl_resp.status_code, 502)
+        self.assertIn("rate limit", rl_resp.json()["detail"].lower())

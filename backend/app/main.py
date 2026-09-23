@@ -1020,10 +1020,18 @@ def process_github_activity_sync(s: Session, u: User, sync_data: Dict[str, Any])
                 existing_ev = s.query(Evidence).filter_by(user_id=u.id, kind='github').all()
                 is_duplicate_ev = False
                 for ev in existing_ev:
-                    if sha and (ev.filename == sha or sha in (ev.value or '')):
+                    if sha:
+                        sha_short = sha[:8]
+                        if ev.filename in (sha, sha_short) or (ev.filename and (sha.startswith(ev.filename) or ev.filename.startswith(sha))):
+                            is_duplicate_ev = True
+                            break
+                        if ev.value and (sha in ev.value or sha_short in ev.value):
+                            is_duplicate_ev = True
+                            break
+                    if url and (ev.value and url in ev.value):
                         is_duplicate_ev = True
                         break
-                    if url and (ev.value and url in ev.value):
+                    if ext_id and ev.filename == ext_id:
                         is_duplicate_ev = True
                         break
 
@@ -1674,6 +1682,7 @@ async def oauth_callback_endpoint(provider: str, x: CallbackIn, s: Session=Depen
     if 'refresh_token' in data and data['refresh_token']:
         it.refresh_token_enc = encrypt_token(data['refresh_token'])
     it.error_message = ''
+    it.sync_status = 'idle'
     it.updated_at = datetime.utcnow()
     
     # Run initial sync automatically with deduplication
@@ -1707,8 +1716,16 @@ async def oauth_callback_endpoint(provider: str, x: CallbackIn, s: Session=Depen
                     )
                     s.add(rec)
     except Exception as e:
-        it.sync_status = 'idle'
-        it.error_message = str(e)
+        safe_msg = re.sub(r'gh[opurs]_[A-Za-z0-9_]+', '[REDACTED]', str(e))
+        safe_msg = re.sub(r'Bearer\s+[A-Za-z0-9_\-\.]+', 'Bearer [REDACTED]', safe_msg)
+        it.sync_status = 'failed'
+        it.error_message = safe_msg
+        if "expired or revoked" in safe_msg.lower() or "401" in safe_msg:
+            it.connected = False
+            it.status = 'reauth_required'
+            it.is_live = False
+            it.access_token_enc = ''
+            it.refresh_token_enc = ''
         
     s.commit()
     mode_label = "Live" if it.is_live else "Demo Simulation"
@@ -1723,6 +1740,8 @@ async def sync_integration_endpoint(provider: str, s: Session=Depends(db), u: Us
     it = s.query(Integration).filter_by(user_id=u.id, provider=prov.name).first()
     if not it or not it.connected:
         raise HTTPException(400, f"{provider} is not connected.")
+    if it.status == 'reauth_required':
+        raise HTTPException(400, f"{provider} token is expired or revoked. Please reconnect via OAuth.")
         
     token = decrypt_token(it.access_token_enc) if it.access_token_enc else ""
     refresh_token = decrypt_token(it.refresh_token_enc) if it.refresh_token_enc else ""
@@ -1734,8 +1753,10 @@ async def sync_integration_endpoint(provider: str, s: Session=Depends(db), u: Us
             if refreshed and 'access_token' in refreshed:
                 token = refreshed['access_token']
                 it.access_token_enc = encrypt_token(token)
-                if 'expires_in' in refreshed:
+                if 'expires_in' in refreshed and refreshed['expires_in']:
                     it.token_expiry = datetime.utcnow() + timedelta(seconds=int(refreshed['expires_in']))
+                if 'refresh_token' in refreshed and refreshed['refresh_token']:
+                    it.refresh_token_enc = encrypt_token(refreshed['refresh_token'])
         except Exception:
             pass
 
@@ -1743,6 +1764,8 @@ async def sync_integration_endpoint(provider: str, s: Session=Depends(db), u: Us
         sync_result = await prov.sync(token)
         it.last_sync_at = datetime.utcnow()
         it.sync_status = 'synced'
+        it.status = 'connected'
+        it.connected = True
         it.error_message = ''
         it.metadata_json = json.dumps(sync_result)
         it.updated_at = datetime.utcnow()
@@ -1786,10 +1809,29 @@ async def sync_integration_endpoint(provider: str, s: Session=Depends(db), u: Us
             "coins": u.coins
         }
     except Exception as exc:
+        raw_msg = str(exc)
+        safe_msg = re.sub(r'gh[opurs]_[A-Za-z0-9_]+', '[REDACTED]', raw_msg)
+        safe_msg = re.sub(r'Bearer\s+[A-Za-z0-9_\-\.]+', 'Bearer [REDACTED]', safe_msg)
         it.sync_status = 'failed'
-        it.error_message = str(exc)
+        it.error_message = safe_msg
+        it.updated_at = datetime.utcnow()
+        
+        is_auth_error = (
+            "expired or revoked" in safe_msg.lower() or
+            "401" in safe_msg or
+            "unauthorized" in safe_msg.lower() or
+            "bad credentials" in safe_msg.lower() or
+            "missing or invalid" in safe_msg.lower()
+        )
+        if is_auth_error:
+            it.connected = False
+            it.status = 'reauth_required'
+            it.is_live = False
+            it.access_token_enc = ''
+            it.refresh_token_enc = ''
+            
         s.commit()
-        raise HTTPException(502, f"Sync error: {str(exc)}")
+        raise HTTPException(502, f"Sync error: {safe_msg}")
 
 @app.post('/api/integrations/{provider}/disconnect')
 async def disconnect_integration_endpoint(provider: str, s: Session=Depends(db), u: User=Depends(current_user)):
